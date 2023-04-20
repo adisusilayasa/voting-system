@@ -1,0 +1,270 @@
+package main
+
+import (
+	"belajar-blockchain/pkg/utils"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+type VoteResult struct {
+	Candidates  []Candidate `json:"candidates"`
+	TotalVoters int         `json:"total_voters"`
+	Percentage  float64     `json:"percentage"`
+}
+
+type Vote struct {
+	VoterID   string `json:"voter_id"`
+	Candidate string `json:"candidate"`
+	Timestamp uint64 `json:"timestamp"`
+}
+
+type Candidate struct {
+	CandidateName string  `json:"candidate_name"`
+	VoterNum      int     `json:"voter_num"`
+	Percentage    float64 `json:"percentage"`
+}
+
+type Block struct {
+	Index        int    `json:"index"`
+	Timestamp    uint64 `json:"timestamp"`
+	Votes        []Vote `json:"votes"`
+	Hash         string `json:"hash"`
+	PreviousHash string `json:"previous_hash"`
+	Nonce        int    `json:"nonce"`
+}
+
+type Blockchain struct {
+	Blocks []*Block
+	mutex  sync.Mutex
+}
+
+func (bc *Blockchain) LatestBlock() *Block {
+	return bc.Blocks[len(bc.Blocks)-1]
+}
+
+func (bc *Blockchain) AddBlock(b *Block) error {
+	bc.mutex.Lock()
+	defer bc.mutex.Unlock()
+
+	if len(bc.Blocks) == 0 {
+		// Set previous hash to an empty string for the first block
+		b.PreviousHash = ""
+	} else {
+		// Set previous hash to the hash of the latest block
+		b.PreviousHash = bc.LatestBlock().Hash
+	}
+
+	b.Index = len(bc.Blocks)
+	b.Timestamp = uint64(time.Now().UnixMilli())
+
+	b.Hash = b.CalculateHash()
+
+	// Validate the hash
+	if b.Hash != b.CalculateHash() {
+		return errors.New("Invalid block hash")
+	}
+
+	bc.Blocks = append(bc.Blocks, b)
+	return nil
+}
+
+func (b *Block) CalculateHash() string {
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%d%d%s%s%d", b.Index, b.Timestamp, b.Votes, b.PreviousHash, b.Nonce)))
+	return hex.EncodeToString(hash[:])
+}
+
+func (v *Vote) SetVoterID(id string) {
+	hash := sha256.Sum256([]byte(id))
+	v.VoterID = hex.EncodeToString(hash[:])
+}
+
+func (bc *Blockchain) AddVote(c *gin.Context, v *Vote) error {
+
+	// Generate a random ID for the voter
+	id := generateRandomID()
+
+	// Set the generated ID for the vote
+	v.SetVoterID(id)
+
+	// Validate the vote
+	err := bc.validateVoter(c, v.VoterID)
+	if err != nil {
+		return err
+	}
+
+	// Create a new block containing the vote
+	b := &Block{Votes: []Vote{*v}}
+
+	// Add the block to the blockchain
+	bc.AddBlock(b)
+
+	return nil
+}
+
+func generateRandomID() string {
+	// Generate a random byte array
+	bytes := make([]byte, 8)
+	_, err := rand.Read(bytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Convert the byte array to a string
+	id := hex.EncodeToString(bytes)
+
+	return id
+}
+
+func (bc *Blockchain) validateVoter(c *gin.Context, voterID string) error {
+	// Check if the voter ID is valid (e.g. length, format, etc.)
+	// ...
+	if len(bc.Blocks) == 0 {
+		return nil
+	}
+
+	// Check if the voter ID already exists in the blockchain
+	for _, block := range bc.Blocks {
+		for _, vote := range block.Votes {
+			if vote.VoterID == voterID {
+				return errors.New("Voter already exists")
+			}
+		}
+	}
+
+	// Voter ID is valid and does not exist in the blockchain
+	return nil
+}
+
+func (bc *Blockchain) GetVoteCountsHandler(c *gin.Context) {
+	// Check if the blockchain has any blocks
+	if len(bc.Blocks) == 0 {
+		c.JSON(http.StatusNotFound, utils.ErrorResponse(http.StatusNotFound, "Blockchain has no blocks"))
+		return
+	}
+
+	// Create a map to store the vote counts for each candidate
+	voteCounts := make(map[string]int)
+
+	// Iterate over the blockchain and count the votes for each candidate
+	for _, block := range bc.Blocks {
+		if block.Votes != nil {
+			for _, vote := range block.Votes {
+				candidate := vote.Candidate
+				voteCounts[candidate]++
+			}
+		}
+	}
+
+	// Calculate the total number of voters
+	totalVoters := len(bc.Blocks) - 1
+
+	// Create a nested JSON object containing the vote count and percentage for each candidate
+	resultCandidate := []Candidate{}
+	for candidate, count := range voteCounts {
+		percentage := float64(count) / float64(totalVoters) * 100
+
+		newData, _ := strconv.ParseFloat(fmt.Sprintf("%.2f", percentage), 64)
+
+		result := Candidate{
+			CandidateName: candidate,
+			VoterNum:      count,
+			Percentage:    newData,
+		}
+
+		resultCandidate = append(resultCandidate, result)
+	}
+
+	results := VoteResult{
+		TotalVoters: totalVoters,
+		Candidates:  resultCandidate,
+	}
+
+	c.JSON(http.StatusOK, utils.SuccessResponse(results))
+}
+
+func (b *Block) calculateHash(block *Block) string {
+	record := sha256.Sum256([]byte(fmt.Sprintf("%d%d%s%s%d", b.Index, b.Timestamp, b.Votes, b.PreviousHash, b.Nonce)))
+
+	// h.Write(record)
+	// hashed := h.Sum(nil)
+	return hex.EncodeToString(record[:])
+}
+
+func (b *Block) genesisBlock() *Block {
+	genesisBlock := &Block{
+		Index:     0,
+		Timestamp: uint64(time.Now().UnixMilli()),
+		// Data:         "Genesis Block",
+		PreviousHash: "",
+	}
+	genesisBlock.Hash = b.calculateHash(genesisBlock)
+	return genesisBlock
+}
+
+func main() {
+	router := gin.Default()
+
+	// Create the genesis block
+	genesisBlock := &Block{
+		Index:     0,
+		Timestamp: uint64(time.Now().UnixMilli()),
+		// Data:          "Genesis Block",
+		PreviousHash: "",
+	}
+	genesisBlock.Hash = genesisBlock.calculateHash(genesisBlock)
+
+	// Store the genesis block in the blockchain
+	blockchain := Blockchain{
+		Blocks: []*Block{genesisBlock},
+	}
+
+	router.POST("/vote", func(c *gin.Context) {
+		var v Vote
+		if err := c.ShouldBindJSON(&v); err != nil {
+			c.JSON(http.StatusBadRequest, utils.ErrorResponse(http.StatusBadRequest, err.Error()))
+			return
+		}
+
+		err := blockchain.AddVote(c, &v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, utils.ErrorResponse(http.StatusBadRequest, err.Error()))
+			return
+		}
+
+		c.JSON(http.StatusOK, utils.SuccessResponse(nil))
+
+	})
+
+	router.GET("/blocks", func(c *gin.Context) {
+		c.JSON(http.StatusOK, utils.SuccessResponse(blockchain.Blocks))
+	})
+
+	router.GET("/vote-count", blockchain.GetVoteCountsHandler)
+
+	router.GET("/blocks/:index", func(c *gin.Context) {
+		index, err := strconv.Atoi(c.Param("index"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, utils.ErrorResponse(http.StatusBadRequest, err.Error()))
+			return
+		}
+
+		if index < 0 || index >= len(blockchain.Blocks) {
+			c.JSON(http.StatusNotFound, utils.ErrorResponse(http.StatusNotFound, "Block not found"))
+			return
+		}
+
+		c.JSON(http.StatusOK, utils.SuccessResponse(blockchain.Blocks[index]))
+	})
+
+	router.Run()
+}
